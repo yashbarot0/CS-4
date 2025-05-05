@@ -1,4 +1,88 @@
 # Multigrid Method Implementation for Poisson Equation
+### MAP55672 (2024-25) - Case Study 4
+
+## 1. Introduction
+
+This report describes my implementation of the Multigrid (MG) method for solving the Poisson equation on a unit square domain. The MG method is a powerful iterative technique for solving large sparse linear systems arising from the discretization of elliptic partial differential equations.
+
+## 2. Problem Formulation
+
+We need to solve the Poisson equation on a unit square domain Ω = (0,1)² with zero Dirichlet boundary conditions:
+
+-Δu(x) = f(x) in Ω
+u(x) = 0 on ∂Ω
+
+Where f(x) = 2π²sin(πx₁)sin(πx₂) is the source function. The exact solution to this problem is u(x) = sin(πx₁)sin(πx₂).
+
+## 3. Discretization
+
+For the spatial discretization, we use the standard 5-point finite difference stencil. Dividing the domain into (N+1)×(N+1) grid points with mesh spacing h = 1/(N+1), the discrete system becomes:
+
+[4u(i,j) - u(i-1,j) - u(i+1,j) - u(i,j-1) - u(i,j+1)]/h² = f(i·h, j·h)
+
+This gives us a linear system Ax = b, where:
+- A is an N²×N² matrix representing the discrete Laplacian
+- x is the vector of unknown solution values u(i·h, j·h)
+- b is the vector of scaled source function values h²·f(i·h, j·h)
+
+## 4. Multigrid Implementation
+
+My implementation follows the V-cycle multigrid algorithm structure as specified in the assignment. Here are the key components:
+
+### 4.1 Data Structure
+
+I use 2D arrays (double**) to represent grids and matrices. For the V-cycle algorithm, I maintain arrays for:
+- A_levels: System matrices at each level
+- x_levels: Solution vectors at each level
+- r_levels: Residual/right-hand side vectors at each level
+
+### 4.2 Grid Transfer Operators
+
+#### Restriction (Fine to Coarse)
+For transferring the residual from a fine grid to a coarse grid, I implemented full weighting restriction:
+
+```
+r_coarse[i][j] = 0.25 * r_fine[2i][2j] +
+                 0.125 * (r_fine[2i+1][2j] + r_fine[2i-1][2j] + 
+                          r_fine[2i][2j+1] + r_fine[2i][2j-1]) +
+                 0.0625 * (r_fine[2i+1][2j+1] + r_fine[2i+1][2j-1] + 
+                           r_fine[2i-1][2j+1] + r_fine[2i-1][2j-1]);
+```
+
+This gives more weight to the central point and less to the surrounding points, ensuring a smooth transition between grid levels.
+
+#### Prolongation (Coarse to Fine)
+For interpolating the correction from a coarse grid to a fine grid, I used bilinear interpolation:
+- Direct injection at coincident points
+- Linear interpolation for non-coincident points
+
+### 4.3 Smoothing Operation
+
+I implemented weighted Jacobi smoothing with a relaxation parameter ω = 2/3:
+
+```
+x_new[i][j] = (1-ω) * x[i][j] + ω * (b[i][j] + sum_of_neighbors) / 4.0
+```
+
+Where sum_of_neighbors is the sum of the values at the neighboring grid points. This provides effective smoothing of high-frequency error components.
+
+### 4.4 Coarsest Level Solver
+
+For the coarsest grid problem, I implemented a Gauss-Seidel solver that iterates until the residual is sufficiently small (tolerance 1e-10). This provides an exact solution at the coarsest level, which is necessary for good convergence of the overall method.
+
+### 4.5 V-cycle Algorithm
+
+The core of the implementation is the recursive V-cycle function. For each level l, it:
+1. Performs pre-smoothing
+2. Computes the residual
+3. Restricts the residual to level l+1
+4. Solves the coarse grid problem (either recursively or directly)
+5. Prolongates the correction back to level l and updates the solution
+6. Performs post-smoothing
+
+The function tracks the number of coarse level solves for performance analysis.
+
+###
 ### 4.6 Safety Measures and Convergence Criteria
 
 The implementation includes several safety measures to ensure robustness:
