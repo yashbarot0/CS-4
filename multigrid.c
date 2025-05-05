@@ -1,541 +1,538 @@
-/**
- * Multigrid Method Implementation for Poisson Problem
- * Case Study 4 - MAP55672 (2024-25)
- * 
- * This program implements a V-cycle multigrid solver for the Poisson equation:
- * -Δu(x) = f(x) on the unit square domain with zero boundary conditions.
- */
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+#ifndef M_PI
+    #define M_PI 3.14159265358979323846
+#endif
 
- #include <stdio.h>
- #include <stdlib.h>
- #include <math.h>
- #include <time.h>
- #include <string.h>
- 
- // Function prototypes
- double** create_grid(int n);
- void free_grid(double** grid, int n);
- double** create_matrix(int n);
- void setup_poisson_matrix(double** A, int n);
- void setup_rhs(double** b, int n, double h);
- double compute_residual_norm(double** A, double** x, double** b, int n);
- void weighted_jacobi_smoother(double** A, double** x, double** b, int n, double omega, int nu);
- void restrict_residual(double** r_fine, double** r_coarse, int n_fine);
- void prolongate_and_correct(double** x_fine, double** x_coarse, int n_coarse);
- void copy_grid(double** dst, double** src, int n);
- int v_cycle(double** A, double** x, double** b, double omega, int nu, int l, int lmax, double** A_levels, double** r_levels, double** x_levels);
- void print_grid(double** grid, int n);
- void gauss_seidel_solve(double** A, double** x, double** b, int n, double tol);
- double f_func(double x1, double x2);
- double exact_solution(double x1, double x2);
- void compute_error(double** u, int n, double h);
- 
- int main(int argc, char* argv[]) {
-     // Parse command line arguments
-     if (argc < 4) {
-         printf("Usage: %s N lmax max_cycles\n", argv[0]);
-         printf("  N: Number of interior grid points in each dimension\n");
-         printf("  lmax: Maximum multigrid level (2 or more)\n");
-         printf("  max_cycles: Maximum number of V-cycles to perform\n");
-         return 1;
-     }
-     
-     int N = atoi(argv[1]);
-     int lmax = atoi(argv[2]);
-     int max_cycles = atoi(argv[3]);
-     
-     // Validate input
-     if (N <= 0 || (N & (N-1)) != 0) {
-         printf("Error: N must be a positive power of 2\n");
-         return 1;
-     }
-     
-     if (lmax < 2) {
-         printf("Error: lmax must be at least 2\n");
-         return 1;
-     }
-     
-     int min_coarse_grid = 4;  // Minimum size of coarsest grid (2 interior points in each dim)
-     int N_coarsest = N >> (lmax - 1);
-     
-     if (N_coarsest < min_coarse_grid) {
-         printf("Error: With N=%d and lmax=%d, coarsest grid would be too small (N=%d)\n", N, lmax, N_coarsest);
-         printf("Maximum valid lmax for N=%d is %d\n", N, (int)(log2(N) - log2(min_coarse_grid) + 1));
-         return 1;
-     }
-     
-     // Mesh spacing
-     double h = 1.0 / (N + 1);
-     
-     // MG parameters
-     double omega = 2.0/3.0;  // Relaxation parameter for weighted Jacobi
-     int nu = 3;              // Number of pre/post-smoothing steps
-     double tol = 1e-7;       // Convergence tolerance for residual norm
-     
-     // Allocate memory for all grid levels
-     double*** A_levels = (double***)malloc(lmax * sizeof(double**));
-     double*** x_levels = (double***)malloc(lmax * sizeof(double**));
-     double*** r_levels = (double***)malloc(lmax * sizeof(double**));
-     
-     int n_level = N;
-     for (int l = 0; l < lmax; l++) {
-         A_levels[l] = create_matrix(n_level);
-         x_levels[l] = create_grid(n_level);
-         r_levels[l] = create_grid(n_level);
-         
-         // Setup Poisson matrix for this level
-         setup_poisson_matrix(A_levels[l], n_level);
-         
-         // Move to next coarser level
-         n_level /= 2;
-     }
-     
-     // Setup right-hand side for finest level
-     setup_rhs(r_levels[0], N, h);
-     
-     // Initial guess (all zeros, already set by create_grid)
-     
-     printf("Starting Multigrid solver with:\n");
-     printf("  N = %d\n", N);
-     printf("  lmax = %d\n", lmax);
-     printf("  max_cycles = %d\n", max_cycles);
-     printf("  omega = %f\n", omega);
-     printf("  nu = %d\n", nu);
-     printf("  tolerance = %e\n", tol);
-     
-     // Start timing
-     clock_t start = clock();
-     
-     // Main iteration loop
-     int cycle;
-     double initial_residual = compute_residual_norm(A_levels[0], x_levels[0], r_levels[0], N);
-     double prev_residual = initial_residual;
-     printf("Initial residual: %e\n", initial_residual);
-     
-     for (cycle = 0; cycle < max_cycles; cycle++) {
-         // Perform one V-cycle
-         int coarse_solves = v_cycle(A_levels[0], x_levels[0], r_levels[0], omega, nu, 0, lmax-1, A_levels, r_levels, x_levels);
-         
-         // Compute new residual
-         double residual = compute_residual_norm(A_levels[0], x_levels[0], r_levels[0], N);
-         
-         printf("Cycle %d: residual = %e, reduction = %e, coarse solves = %d\n", 
-                cycle+1, residual, residual/prev_residual, coarse_solves);
-         
-         // Check for convergence
-         if (residual < tol) {
-             printf("Converged to tolerance after %d cycles!\n", cycle+1);
-             break;
-         }
-         
-         // Check for divergence or stagnation
-         if (residual > 10.0 * prev_residual) {
-             printf("Warning: Solution is diverging, stopping.\n");
-             break;
-         }
-         
-         if (residual > 0.9 * prev_residual && cycle > 5) {
-             printf("Warning: Very slow convergence, stopping.\n");
-             break;
-         }
-         
-         prev_residual = residual;
-     }
-     
-     // End timing
-     clock_t end = clock();
-     double cpu_time = ((double) (end - start)) / CLOCKS_PER_SEC;
-     
-     printf("Total runtime: %.6f seconds\n", cpu_time);
-     
-     // Compute and print error against analytical solution
-     compute_error(x_levels[0], N, h);
-     
-     // Free memory
-     for (int l = 0; l < lmax; l++) {
-         free_grid(A_levels[l], N >> l);
-         free_grid(x_levels[l], N >> l);
-         free_grid(r_levels[l], N >> l);
-     }
-     free(A_levels);
-     free(x_levels);
-     free(r_levels);
-     
-     return 0;
- }
- 
- /**
-  * Creates a 2D grid of size n×n, initialized to zero
-  */
- double** create_grid(int n) {
-     double** grid = (double**)malloc(n * sizeof(double*));
-     for (int i = 0; i < n; i++) {
-         grid[i] = (double*)calloc(n, sizeof(double));
-     }
-     return grid;
- }
- 
- /**
-  * Frees memory allocated for a 2D grid
-  */
- void free_grid(double** grid, int n) {
-     for (int i = 0; i < n; i++) {
-         free(grid[i]);
-     }
-     free(grid);
- }
- 
- /**
-  * Creates a matrix for storing the coefficient matrix A
-  */
- double** create_matrix(int n) {
-     return create_grid(n * n);
- }
- 
- /**
-  * Sets up the coefficient matrix A for the Poisson equation using
-  * finite difference approximation
-  */
- void setup_poisson_matrix(double** A, int n) {
-     int size = n * n;
-     
-     // Clear matrix
-     for (int i = 0; i < size; i++) {
-         for (int j = 0; j < size; j++) {
-             A[i][j] = 0.0;
-         }
-     }
-     
-     // Fill matrix with 5-point stencil values
-     for (int i = 0; i < n; i++) {
-         for (int j = 0; j < n; j++) {
-             int idx = i * n + j;
-             
-             // Diagonal element
-             A[idx][idx] = 4.0;
-             
-             // Off-diagonal elements (neighbors)
-             if (i > 0) A[idx][idx-n] = -1.0;  // up
-             if (i < n-1) A[idx][idx+n] = -1.0;  // down
-             if (j > 0) A[idx][idx-1] = -1.0;  // left
-             if (j < n-1) A[idx][idx+1] = -1.0;  // right
-         }
-     }
- }
- 
- /**
-  * Source function for the Poisson equation: f(x) = 2π² sin(πx₁) sin(πx₂)
-  */
- double f_func(double x1, double x2) {
-     return 2.0 * M_PI * M_PI * sin(M_PI * x1) * sin(M_PI * x2);
- }
- 
- /**
-  * Exact solution u(x) = sin(πx₁) sin(πx₂)
-  */
- double exact_solution(double x1, double x2) {
-     return sin(M_PI * x1) * sin(M_PI * x2);
- }
- 
- /**
-  * Sets up the right-hand side vector b based on the source function
-  */
- void setup_rhs(double** b, int n, double h) {
-     for (int i = 0; i < n; i++) {
-         for (int j = 0; j < n; j++) {
-             // Convert grid index to physical coordinates
-             double x1 = (i + 1) * h;
-             double x2 = (j + 1) * h;
-             
-             // Set RHS value from source function and scale by h²
-             b[i][j] = f_func(x1, x2) * h * h;
-         }
-     }
- }
- 
- /**
-  * Computes the 2-norm of the residual r = b - Ax
-  */
- double compute_residual_norm(double** A, double** x, double** b, int n) {
-     double norm = 0.0;
-     
-     // Compute residual directly using the 5-point stencil
-     for (int i = 0; i < n; i++) {
-         for (int j = 0; j < n; j++) {
-             double Ax_val = 4.0 * x[i][j];
-             
-             if (i > 0) Ax_val -= x[i-1][j];
-             if (i < n-1) Ax_val -= x[i+1][j];
-             if (j > 0) Ax_val -= x[i][j-1];
-             if (j < n-1) Ax_val -= x[i][j+1];
-             
-             double residual = b[i][j] - Ax_val;
-             norm += residual * residual;
-         }
-     }
-     
-     return sqrt(norm);
- }
- 
- /**
-  * Performs weighted Jacobi smoothing iterations
-  */
- void weighted_jacobi_smoother(double** A, double** x, double** b, int n, double omega, int nu) {
-     double** x_new = create_grid(n);
-     
-     for (int iter = 0; iter < nu; iter++) {
-         // Perform one Jacobi iteration
-         for (int i = 0; i < n; i++) {
-             for (int j = 0; j < n; j++) {
-                 double sum = 0.0;
-                 
-                 // Add contributions from neighbors
-                 if (i > 0) sum += x[i-1][j];
-                 if (i < n-1) sum += x[i+1][j];
-                 if (j > 0) sum += x[i][j-1];
-                 if (j < n-1) sum += x[i][j+1];
-                 
-                 // Update using weighted average
-                 x_new[i][j] = (1.0 - omega) * x[i][j] + omega * (b[i][j] + sum) / 4.0;
-             }
-         }
-         
-         // Copy new values back to x
-         copy_grid(x, x_new, n);
-     }
-     
-     free_grid(x_new, n);
- }
- 
- /**
-  * Restricts the residual from fine to coarse grid (Full weighting)
-  */
- void restrict_residual(double** r_fine, double** r_coarse, int n_fine) {
-     int n_coarse = n_fine / 2;
-     
-     for (int i = 0; i < n_coarse; i++) {
-         for (int j = 0; j < n_coarse; j++) {
-             int i_fine = 2 * i;
-             int j_fine = 2 * j;
-             
-             // Full weighting restriction
-             r_coarse[i][j] = 0.25 * r_fine[i_fine][j_fine] +
-                              0.125 * (r_fine[i_fine+1][j_fine] + r_fine[i_fine-1][j_fine] + 
-                                      r_fine[i_fine][j_fine+1] + r_fine[i_fine][j_fine-1]) +
-                              0.0625 * (r_fine[i_fine+1][j_fine+1] + r_fine[i_fine+1][j_fine-1] + 
-                                       r_fine[i_fine-1][j_fine+1] + r_fine[i_fine-1][j_fine-1]);
-         }
-     }
- }
- 
- /**
-  * Prolongates the correction from coarse to fine grid and adds it to the fine grid solution
-  */
- void prolongate_and_correct(double** x_fine, double** x_coarse, int n_coarse) {
-     int n_fine = 2 * n_coarse;
-     
-     // Bilinear interpolation
-     for (int i = 0; i < n_fine; i++) {
-         for (int j = 0; j < n_fine; j++) {
-             int i_coarse = i / 2;
-             int j_coarse = j / 2;
-             
-             // Determine weights based on position
-             double w_i = (i % 2 == 0) ? 1.0 : 0.5;
-             double w_j = (j % 2 == 0) ? 1.0 : 0.5;
-             
-             // Apply bilinear interpolation
-             if (i % 2 == 0 && j % 2 == 0) {
-                 // Direct injection at coarse grid points
-                 x_fine[i][j] += x_coarse[i_coarse][j_coarse];
-             } 
-             else if (i % 2 == 1 && j % 2 == 0) {
-                 // Interpolate in i direction
-                 if (i_coarse + 1 < n_coarse) {
-                     x_fine[i][j] += 0.5 * (x_coarse[i_coarse][j_coarse] + x_coarse[i_coarse+1][j_coarse]);
-                 } else {
-                     x_fine[i][j] += x_coarse[i_coarse][j_coarse];
-                 }
-             }
-             else if (i % 2 == 0 && j % 2 == 1) {
-                 // Interpolate in j direction
-                 if (j_coarse + 1 < n_coarse) {
-                     x_fine[i][j] += 0.5 * (x_coarse[i_coarse][j_coarse] + x_coarse[i_coarse][j_coarse+1]);
-                 } else {
-                     x_fine[i][j] += x_coarse[i_coarse][j_coarse];
-                 }
-             }
-             else {
-                 // Interpolate in both directions
-                 if (i_coarse + 1 < n_coarse && j_coarse + 1 < n_coarse) {
-                     x_fine[i][j] += 0.25 * (x_coarse[i_coarse][j_coarse] + 
-                                            x_coarse[i_coarse+1][j_coarse] +
-                                            x_coarse[i_coarse][j_coarse+1] +
-                                            x_coarse[i_coarse+1][j_coarse+1]);
-                 } else if (i_coarse + 1 < n_coarse) {
-                     x_fine[i][j] += 0.5 * (x_coarse[i_coarse][j_coarse] + 
-                                           x_coarse[i_coarse+1][j_coarse]);
-                 } else if (j_coarse + 1 < n_coarse) {
-                     x_fine[i][j] += 0.5 * (x_coarse[i_coarse][j_coarse] + 
-                                           x_coarse[i_coarse][j_coarse+1]);
-                 } else {
-                     x_fine[i][j] += x_coarse[i_coarse][j_coarse];
-                 }
-             }
-         }
-     }
- }
- 
- /**
-  * Copies values from src grid to dst grid
-  */
- void copy_grid(double** dst, double** src, int n) {
-     for (int i = 0; i < n; i++) {
-         for (int j = 0; j < n; j++) {
-             dst[i][j] = src[i][j];
-         }
-     }
- }
- 
- /**
-  * Solves the coarsest level system using Gauss-Seidel iteration
-  */
- void gauss_seidel_solve(double** A, double** x, double** b, int n, double tol) {
-     int max_iter = 1000;
-     double** r = create_grid(n);
-     
-     for (int iter = 0; iter < max_iter; iter++) {
-         // Perform one Gauss-Seidel iteration
-         for (int i = 0; i < n; i++) {
-             for (int j = 0; j < n; j++) {
-                 double sum = 0.0;
-                 
-                 // Add contributions from neighbors (using updated values where available)
-                 if (i > 0) sum += x[i-1][j];
-                 if (i < n-1) sum += x[i+1][j];
-                 if (j > 0) sum += x[i][j-1];
-                 if (j < n-1) sum += x[i][j+1];
-                 
-                 // Update solution
-                 x[i][j] = (b[i][j] + sum) / 4.0;
-             }
-         }
-         
-         // Check residual every few iterations
-         if (iter % 5 == 0) {
-             double res_norm = compute_residual_norm(A, x, b, n);
-             if (res_norm < tol) {
-                 break;
-             }
-         }
-     }
-     
-     free_grid(r, n);
- }
- 
- /**
-  * Recursive implementation of the V-cycle multigrid algorithm
-  * Returns the number of coarse level solves performed
-  */
- int v_cycle(double** A, double** x, double** b, double omega, int nu, int l, int lmax, 
-            double*** A_levels, double*** r_levels, double*** x_levels) {
-     int n = 1 << (log2(r_levels[0][0] != 0 ? sizeof(r_levels[0])/sizeof(r_levels[0][0]) : 1) - l);
-     int coarse_solves = 0;
-     
-     // 1. Pre-smoothing
-     weighted_jacobi_smoother(A, x, b, n, omega, nu);
-     
-     // 2. Compute residual r = b - A*x
-     for (int i = 0; i < n; i++) {
-         for (int j = 0; j < n; j++) {
-             double Ax_val = 4.0 * x[i][j];
-             
-             if (i > 0) Ax_val -= x[i-1][j];
-             if (i < n-1) Ax_val -= x[i+1][j];
-             if (j > 0) Ax_val -= x[i][j-1];
-             if (j < n-1) Ax_val -= x[i][j+1];
-             
-             r_levels[l][i][j] = b[i][j] - Ax_val;
-         }
-     }
-     
-     // 3. Restrict residual to coarser grid
-     if (l < lmax) {
-         int n_coarse = n / 2;
-         double** r_coarse = r_levels[l+1];
-         
-         // Reset coarse grid correction
-         for (int i = 0; i < n_coarse; i++) {
-             for (int j = 0; j < n_coarse; j++) {
-                 x_levels[l+1][i][j] = 0.0;
-             }
-         }
-         
-         // Restrict residual
-         restrict_residual(r_levels[l], r_coarse, n);
-         
-         // 4. Recursively solve coarse grid problem or solve directly if at coarsest level
-         if (l+1 == lmax) {
-             // Direct solve at coarsest level
-             gauss_seidel_solve(A_levels[l+1], x_levels[l+1], r_coarse, n_coarse, 1e-10);
-             coarse_solves = 1;
-         } else {
-             // Recurse to next level
-             coarse_solves = v_cycle(A_levels[l+1], x_levels[l+1], r_coarse, omega, nu, l+1, lmax, 
-                                   A_levels, r_levels, x_levels);
-         }
-         
-         // 5. Prolongate and correct
-         prolongate_and_correct(x, x_levels[l+1], n_coarse);
-     }
-     
-     // 6. Post-smoothing
-     weighted_jacobi_smoother(A, x, b, n, omega, nu);
-     
-     return coarse_solves;
- }
- 
- /**
-  * Prints grid values for debugging
-  */
- void print_grid(double** grid, int n) {
-     for (int i = 0; i < n; i++) {
-         for (int j = 0; j < n; j++) {
-             printf("%8.5f ", grid[i][j]);
-         }
-         printf("\n");
-     }
- }
- 
- /**
-  * Computes the error between numerical and exact solution
-  */
- void compute_error(double** u, int n, double h) {
-     double max_error = 0.0;
-     double l2_error = 0.0;
-     
-     for (int i = 0; i < n; i++) {
-         for (int j = 0; j < n; j++) {
-             // Convert grid index to physical coordinates
-             double x1 = (i + 1) * h;
-             double x2 = (j + 1) * h;
-             
-             // Compute exact solution
-             double u_exact = exact_solution(x1, x2);
-             
-             // Compute error
-             double error = fabs(u[i][j] - u_exact);
-             l2_error += error * error;
-             
-             if (error > max_error) {
-                 max_error = error;
-             }
-         }
-     }
-     
-     l2_error = sqrt(l2_error / (n * n));
-     
-     printf("Error analysis:\n");
-     printf("  Max error: %e\n", max_error);
-     printf("  L2 error:  %e\n", l2_error);
- }
+// Function prototypes
+void initialize_grid(double *grid, int n);
+void initialize_rhs(double *rhs, int n);
+double compute_residual(double *u, double *f, int n);
+void smooth(double *u, double *f, int n, double omega, int nu);
+void restrict_residual(double *r_fine, double *r_coarse, int n_fine);
+void prolongate_correction(double *e_coarse, double *e_fine, int n_coarse);
+void add_correction(double *u, double *correction, int n);
+void solve_coarsest(double *u, double *f, int n);
+void print_grid(double *grid, int n);
+void print_convergence(int cycle, double residual);
+double exact_solution(double x, double y);
+double source_function(double x, double y);
+
+// Multigrid V-cycle implementation
+void v_cycle(double *u, double *f, int n, double omega, int nu, int lmax, int level) {
+    // Base case: solve exactly on the coarsest grid
+    if (level == lmax) {
+        solve_coarsest(u, f, n);
+        return;
+    }
+    
+    int size = n * n;
+    double *residual = (double *)malloc(size * sizeof(double));
+    
+    // Pre-smoothing: nu iterations of weighted Jacobi
+    smooth(u, f, n, omega, nu);
+    
+    // Compute residual: r = f - Au
+    for (int i = 0; i < size; i++) {
+        residual[i] = 0.0;
+    }
+    
+    double h = 1.0 / (n + 1);
+    double h2 = h * h;
+    
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            int idx = i * n + j;
+            double Au = 0.0;
+            
+            // Interior points
+            if (i > 0) Au += u[(i-1) * n + j];
+            if (i < n-1) Au += u[(i+1) * n + j];
+            if (j > 0) Au += u[i * n + j-1];
+            if (j < n-1) Au += u[i * n + j+1];
+            
+            // Center point with appropriate scaling
+            Au -= 4.0 * u[idx];
+            
+            // Scale by 1/h^2
+            Au /= -h2;
+            
+            // Residual = f - Au
+            residual[idx] = f[idx] - Au;
+        }
+    }
+    
+    // Restrict residual to coarser grid
+    int n_coarse = (n - 1) / 2;
+    double *f_coarse = (double *)malloc(n_coarse * n_coarse * sizeof(double));
+    double *u_coarse = (double *)malloc(n_coarse * n_coarse * sizeof(double));
+    
+    // Initialize coarse grid correction to zero
+    for (int i = 0; i < n_coarse * n_coarse; i++) {
+        u_coarse[i] = 0.0;
+    }
+    
+    // Restriction operation (fine to coarse)
+    restrict_residual(residual, f_coarse, n);
+    
+    // Recursive call to solve on coarser grid
+    v_cycle(u_coarse, f_coarse, n_coarse, omega, nu, lmax, level + 1);
+    
+    // Prolongate correction back to fine grid
+    double *correction = (double *)malloc(size * sizeof(double));
+    for (int i = 0; i < size; i++) {
+        correction[i] = 0.0;
+    }
+    
+    // Prolongation operation (coarse to fine)
+    prolongate_correction(u_coarse, correction, n_coarse);
+    
+    // Add correction to solution
+    add_correction(u, correction, n);
+    
+    // Post-smoothing: nu iterations of weighted Jacobi
+    smooth(u, f, n, omega, nu);
+    
+    // Clean up
+    free(residual);
+    free(f_coarse);
+    free(u_coarse);
+    free(correction);
+}
+
+// Full multigrid solver
+double multigrid_solve(double *u, double *f, int n, double omega, int nu, int lmax, 
+                       int max_cycles, double tol) {
+    double residual, initial_residual;
+    int cycle = 0;
+    
+    // Calculate initial residual
+    initial_residual = compute_residual(u, f, n);
+    residual = initial_residual;
+    
+    printf("Initial residual: %e\n", residual);
+    
+    // Main loop
+    while (cycle < max_cycles && residual > tol) {
+        // Perform one V-cycle
+        v_cycle(u, f, n, omega, nu, lmax, 1);
+        
+        // Compute new residual
+        residual = compute_residual(u, f, n);
+        
+        // Print convergence information
+        print_convergence(++cycle, residual);
+        
+        // Check for divergence
+        if (residual > 1e6 * initial_residual) {
+            printf("Divergence detected! Stopping.\n");
+            break;
+        }
+        
+        // Check for very slow convergence
+        if (cycle > 10 && residual > 0.95 * initial_residual) {
+            printf("Convergence too slow! Stopping.\n");
+            break;
+        }
+    }
+    
+    return residual;
+}
+
+// Compute L2 norm of the residual
+double compute_residual(double *u, double *f, int n) {
+    double residual_norm = 0.0;
+    double h = 1.0 / (n + 1);
+    double h2 = h * h;
+    
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            int idx = i * n + j;
+            double Au = 0.0;
+            
+            // Interior points
+            if (i > 0) Au += u[(i-1) * n + j];
+            if (i < n-1) Au += u[(i+1) * n + j];
+            if (j > 0) Au += u[i * n + j-1];
+            if (j < n-1) Au += u[i * n + j+1];
+            
+            // Center point
+            Au -= 4.0 * u[idx];
+            
+            // Scale by 1/h^2
+            Au /= -h2;
+            
+            // Residual = f - Au
+            double res = f[idx] - Au;
+            residual_norm += res * res;
+        }
+    }
+    
+    return sqrt(residual_norm);
+}
+
+// Weighted Jacobi smoothing
+void smooth(double *u, double *f, int n, double omega, int nu) {
+    double h = 1.0 / (n + 1);
+    double h2 = h * h;
+    double *u_new = (double *)malloc(n * n * sizeof(double));
+    
+    for (int iter = 0; iter < nu; iter++) {
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                int idx = i * n + j;
+                double sum = 0.0;
+                
+                // Sum of neighboring points
+                if (i > 0) sum += u[(i-1) * n + j];
+                if (i < n-1) sum += u[(i+1) * n + j];
+                if (j > 0) sum += u[i * n + j-1];
+                if (j < n-1) sum += u[i * n + j+1];
+                
+                // Weighted Jacobi update
+                u_new[idx] = (1.0 - omega) * u[idx] + omega * (h2 * f[idx] + sum) / 4.0;
+            }
+        }
+        
+        // Copy updated values back to u
+        for (int i = 0; i < n * n; i++) {
+            u[i] = u_new[i];
+        }
+    }
+    
+    free(u_new);
+}
+
+// Restriction operation (fine to coarse grid)
+void restrict_residual(double *r_fine, double *r_coarse, int n_fine) {
+    int n_coarse = (n_fine - 1) / 2;
+    
+    for (int i = 0; i < n_coarse; i++) {
+        for (int j = 0; j < n_coarse; j++) {
+            int i_fine = 2 * i + 1;
+            int j_fine = 2 * j + 1;
+            
+            // Full-weighting restriction
+            double sum = 0.0;
+            
+            // Center point (weight 4)
+            sum += 4.0 * r_fine[i_fine * n_fine + j_fine];
+            
+            // Edge points (weight 2)
+            sum += 2.0 * r_fine[(i_fine-1) * n_fine + j_fine];
+            sum += 2.0 * r_fine[(i_fine+1) * n_fine + j_fine];
+            sum += 2.0 * r_fine[i_fine * n_fine + (j_fine-1)];
+            sum += 2.0 * r_fine[i_fine * n_fine + (j_fine+1)];
+            
+            // Corner points (weight 1)
+            sum += r_fine[(i_fine-1) * n_fine + (j_fine-1)];
+            sum += r_fine[(i_fine-1) * n_fine + (j_fine+1)];
+            sum += r_fine[(i_fine+1) * n_fine + (j_fine-1)];
+            sum += r_fine[(i_fine+1) * n_fine + (j_fine+1)];
+            
+            // Scale by 1/16
+            r_coarse[i * n_coarse + j] = sum / 16.0;
+        }
+    }
+}
+
+// Prolongation operation (coarse to fine grid)
+void prolongate_correction(double *e_coarse, double *e_fine, int n_coarse) {
+    int n_fine = 2 * n_coarse + 1;
+    
+    // Set fine grid points to zero first
+    for (int i = 0; i < n_fine * n_fine; i++) {
+        e_fine[i] = 0.0;
+    }
+    
+    // Bilinear interpolation
+    for (int i_c = 0; i_c < n_coarse; i_c++) {
+        for (int j_c = 0; j_c < n_coarse; j_c++) {
+            int i_f = 2 * i_c + 1;
+            int j_f = 2 * j_c + 1;
+            
+            // Coarse grid point directly to fine grid
+            e_fine[i_f * n_fine + j_f] = e_coarse[i_c * n_coarse + j_c];
+            
+            // Horizontally adjacent points
+            if (j_c > 0) {
+                e_fine[i_f * n_fine + (j_f-1)] = 0.5 * (e_coarse[i_c * n_coarse + j_c] + 
+                                                       e_coarse[i_c * n_coarse + (j_c-1)]);
+            }
+            
+            if (j_c < n_coarse-1) {
+                e_fine[i_f * n_fine + (j_f+1)] = 0.5 * (e_coarse[i_c * n_coarse + j_c] + 
+                                                       e_coarse[i_c * n_coarse + (j_c+1)]);
+            }
+            
+            // Vertically adjacent points
+            if (i_c > 0) {
+                e_fine[(i_f-1) * n_fine + j_f] = 0.5 * (e_coarse[i_c * n_coarse + j_c] + 
+                                                       e_coarse[(i_c-1) * n_coarse + j_c]);
+            }
+            
+            if (i_c < n_coarse-1) {
+                e_fine[(i_f+1) * n_fine + j_f] = 0.5 * (e_coarse[i_c * n_coarse + j_c] + 
+                                                       e_coarse[(i_c+1) * n_coarse + j_c]);
+            }
+            
+            // Diagonally adjacent points
+            if (i_c > 0 && j_c > 0) {
+                e_fine[(i_f-1) * n_fine + (j_f-1)] = 0.25 * (e_coarse[i_c * n_coarse + j_c] + 
+                                                            e_coarse[(i_c-1) * n_coarse + j_c] +
+                                                            e_coarse[i_c * n_coarse + (j_c-1)] +
+                                                            e_coarse[(i_c-1) * n_coarse + (j_c-1)]);
+            }
+            
+            if (i_c > 0 && j_c < n_coarse-1) {
+                e_fine[(i_f-1) * n_fine + (j_f+1)] = 0.25 * (e_coarse[i_c * n_coarse + j_c] + 
+                                                            e_coarse[(i_c-1) * n_coarse + j_c] +
+                                                            e_coarse[i_c * n_coarse + (j_c+1)] +
+                                                            e_coarse[(i_c-1) * n_coarse + (j_c+1)]);
+            }
+            
+            if (i_c < n_coarse-1 && j_c > 0) {
+                e_fine[(i_f+1) * n_fine + (j_f-1)] = 0.25 * (e_coarse[i_c * n_coarse + j_c] + 
+                                                            e_coarse[(i_c+1) * n_coarse + j_c] +
+                                                            e_coarse[i_c * n_coarse + (j_c-1)] +
+                                                            e_coarse[(i_c+1) * n_coarse + (j_c-1)]);
+            }
+            
+            if (i_c < n_coarse-1 && j_c < n_coarse-1) {
+                e_fine[(i_f+1) * n_fine + (j_f+1)] = 0.25 * (e_coarse[i_c * n_coarse + j_c] + 
+                                                            e_coarse[(i_c+1) * n_coarse + j_c] +
+                                                            e_coarse[i_c * n_coarse + (j_c+1)] +
+                                                            e_coarse[(i_c+1) * n_coarse + (j_c+1)]);
+            }
+        }
+    }
+}
+
+// Add correction to solution
+void add_correction(double *u, double *correction, int n) {
+    for (int i = 0; i < n * n; i++) {
+        u[i] += correction[i];
+    }
+}
+
+// Direct solver for the coarsest grid
+void solve_coarsest(double *u, double *f, int n) {
+    // For very small grids, use simple Gauss-Seidel iteration
+    double h = 1.0 / (n + 1);
+    double h2 = h * h;
+    double residual, tol = 1e-10;
+    int max_iter = 1000, iter = 0;
+    
+    do {
+        residual = 0.0;
+        
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                int idx = i * n + j;
+                double old_val = u[idx];
+                double sum = 0.0;
+                
+                // Sum of neighboring points
+                if (i > 0) sum += u[(i-1) * n + j];
+                if (i < n-1) sum += u[(i+1) * n + j];
+                if (j > 0) sum += u[i * n + j-1];
+                if (j < n-1) sum += u[i * n + j+1];
+                
+                // Gauss-Seidel update
+                u[idx] = (h2 * f[idx] + sum) / 4.0;
+                
+                // Residual computation
+                double res = u[idx] - old_val;
+                residual += res * res;
+            }
+        }
+        
+        residual = sqrt(residual);
+        iter++;
+        
+    } while (iter < max_iter && residual > tol);
+}
+
+// Initialize grid to zeros
+void initialize_grid(double *grid, int n) {
+    for (int i = 0; i < n * n; i++) {
+        grid[i] = 0.0;
+    }
+}
+
+// Initialize right-hand side with f(x,y) = 2π²sin(πx)sin(πy)
+void initialize_rhs(double *rhs, int n) {
+    double h = 1.0 / (n + 1);
+    
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            double x = (i + 1) * h;
+            double y = (j + 1) * h;
+            rhs[i * n + j] = source_function(x, y);
+        }
+    }
+}
+
+// Source function f(x,y) = 2π²sin(πx)sin(πy)
+double source_function(double x, double y) {
+    return 2.0 * M_PI * M_PI * sin(M_PI * x) * sin(M_PI * y);
+}
+
+// Exact solution u(x,y) = sin(πx)sin(πy)
+double exact_solution(double x, double y) {
+    return sin(M_PI * x) * sin(M_PI * y);
+}
+
+// Print grid values
+void print_grid(double *grid, int n) {
+    if (n > 16) {
+        printf("Grid too large to print (n = %d)\n", n);
+        return;
+    }
+    
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            printf("%10.6f ", grid[i * n + j]);
+        }
+        printf("\n");
+    }
+    printf("\n");
+}
+
+// Print convergence information
+void print_convergence(int cycle, double residual) {
+    printf("Cycle %3d: Residual = %e\n", cycle, residual);
+}
+
+// Calculate error compared to exact solution
+double calculate_error(double *u, int n) {
+    double error = 0.0;
+    double h = 1.0 / (n + 1);
+    
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            double x = (i + 1) * h;
+            double y = (j + 1) * h;
+            double exact = exact_solution(x, y);
+            double diff = u[i * n + j] - exact;
+            error += diff * diff;
+        }
+    }
+    
+    return sqrt(error) / (n * n);
+}
+
+// Main function
+int main() {
+    // Test parameters
+    int N[] = {16, 32, 64, 128, 256};
+    int num_N = sizeof(N) / sizeof(N[0]);
+    double omega = 0.8;  // Relaxation parameter for weighted Jacobi
+    int nu = 2;         // Number of pre/post-smoothing steps
+    double tol = 1e-7;  // Stopping tolerance
+    int max_cycles = 100; // Maximum number of V-cycles
+    
+    printf("Multigrid Solver for the Poisson Equation\n");
+    printf("----------------------------------------\n\n");
+    
+    // Part 1: Fixed grid size, varying lmax
+    printf("Part 1: Fixed grid size (N=128), varying lmax\n");
+    printf("--------------------------------------------\n");
+    
+    int fixed_N = 128;
+    int max_lmax = 1;
+    int temp_N = fixed_N;
+    
+    // Determine maximum possible lmax
+    while (temp_N > 2) {
+        temp_N = (temp_N - 1) / 2;
+        max_lmax++;
+    }
+    
+    printf("Maximum possible lmax for N=%d is %d\n\n", fixed_N, max_lmax);
+    
+    // Loop over different lmax values
+    for (int lmax = 2; lmax <= max_lmax; lmax++) {
+        double *u = (double *)malloc(fixed_N * fixed_N * sizeof(double));
+        double *f = (double *)malloc(fixed_N * fixed_N * sizeof(double));
+        
+        initialize_grid(u, fixed_N);
+        initialize_rhs(f, fixed_N);
+        
+        printf("Running with lmax = %d\n", lmax);
+        
+        clock_t start = clock();
+        double final_res = multigrid_solve(u, f, fixed_N, omega, nu, lmax, max_cycles, tol);
+        clock_t end = clock();
+        
+        double runtime = (double)(end - start) / CLOCKS_PER_SEC;
+        double error = calculate_error(u, fixed_N);
+        
+        printf("Final residual: %e\n", final_res);
+        printf("Error: %e\n", error);
+        printf("Runtime: %.3f seconds\n\n", runtime);
+        
+        free(u);
+        free(f);
+    }
+    
+    // Part 2: Varying grid size, comparing 2-level vs max-level
+    printf("Part 2: Varying grid size, comparing 2-level vs max-level\n");
+    printf("-----------------------------------------------------\n");
+    
+    for (int i = 0; i < num_N; i++) {
+        int n = N[i];
+        double *u1 = (double *)malloc(n * n * sizeof(double));
+        double *f1 = (double *)malloc(n * n * sizeof(double));
+        double *u2 = (double *)malloc(n * n * sizeof(double));
+        double *f2 = (double *)malloc(n * n * sizeof(double));
+        
+        // Determine max lmax for this grid size
+        int curr_lmax = 1;
+        int temp_n = n;
+        while (temp_n > 8) {  // Coarsest level has N=8
+            temp_n = (temp_n - 1) / 2;
+            curr_lmax++;
+        }
+        
+        // Initialize grids
+        initialize_grid(u1, n);
+        initialize_rhs(f1, n);
+        initialize_grid(u2, n);
+        initialize_rhs(f2, n);
+        
+        printf("Grid size N = %d\n", n);
+        
+        // 2-level multigrid
+        printf("2-level multigrid:\n");
+        clock_t start1 = clock();
+        double res1 = multigrid_solve(u1, f1, n, omega, nu, 2, max_cycles, tol);
+        clock_t end1 = clock();
+        double runtime1 = (double)(end1 - start1) / CLOCKS_PER_SEC;
+        double error1 = calculate_error(u1, n);
+        
+        // Max-level multigrid
+        printf("\nMax-level multigrid (lmax = %d):\n", curr_lmax);
+        clock_t start2 = clock();
+        double res2 = multigrid_solve(u2, f2, n, omega, nu, curr_lmax, max_cycles, tol);
+        clock_t end2 = clock();
+        double runtime2 = (double)(end2 - start2) / CLOCKS_PER_SEC;
+        double error2 = calculate_error(u2, n);
+        
+        // Print comparison
+        printf("\nComparison summary for N = %d:\n", n);
+        printf("                   2-level     Max-level\n");
+        printf("Final residual:    %e  %e\n", res1, res2);
+        printf("Error:             %e  %e\n", error1, error2);
+        printf("Runtime (seconds): %.3f        %.3f\n\n", runtime1, runtime2);
+        
+        free(u1);
+        free(f1);
+        free(u2);
+        free(f2);
+    }
+    
+    return 0;
+}
